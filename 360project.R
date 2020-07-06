@@ -1,0 +1,834 @@
+# install the required packages first
+require(jsonlite)
+require(httr)
+require(data.table)
+require(ggplot2)
+require(xts)
+require(forecast)
+require(zoo)
+get_token <- function(username, password, url_site){
+    
+    post_body = list(username=username,password=password)
+    post_url_string = paste0(url_site,'/token/')
+    result = POST(post_url_string, body = post_body)
+
+    # error handling (wrong credentials)
+    if(result$status_code==400){
+        print('Check your credentials')
+        return(0)
+    }
+    else if (result$status_code==201){
+        output = content(result)
+        token = output$key
+    }
+
+    return(token)
+}
+
+get_data <- function(start_date='2020-03-20', token, url_site){
+    
+    post_body = list(start_date=start_date,username=username,password=password)
+    post_url_string = paste0(url_site,'/dataset/')
+    
+    header = add_headers(c(Authorization=paste('Token',token,sep=' ')))
+    result = GET(post_url_string, header, body = post_body)
+    output = content(result)
+    data = data.table::rbindlist(output)
+    data[,event_date:=as.Date(event_date)]
+    data = data[order(product_content_id,event_date)]
+    return(data)
+}
+
+
+send_submission <- function(predictions, token, url_site, submit_now=F){
+    
+    format_check=check_format(predictions)
+    if(!format_check){
+        return(FALSE)
+    }
+    
+    post_string="list("
+    for(i in 1:nrow(predictions)){
+        post_string=sprintf("%s'%s'=%s",post_string,predictions$product_content_id[i],predictions$forecast[i])
+        if(i<nrow(predictions)){
+            post_string=sprintf("%s,",post_string)
+        } else {
+            post_string=sprintf("%s)",post_string)
+        }
+    }
+    
+    submission = eval(parse(text=post_string))
+    json_body = jsonlite::toJSON(submission, auto_unbox = TRUE)
+    submission=list(submission=json_body)
+    
+    print(submission)
+    # {"31515569":2.4,"32939029":2.4,"4066298":2.4,"6676673":2.4,"7061886":2.4,"85004":2.4} 
+
+    if(!submit_now){
+        print("You did not submit.")
+        return(FALSE)      
+    }
+    
+
+    header = add_headers(c(Authorization=paste('Token',token,sep=' ')))
+    post_url_string = paste0(url_site,'/submission/')
+    result = POST(post_url_string, header, body=submission)
+    
+    if (result$status_code==201){
+        print("Successfully submitted. Below you can see the details of your submission")
+    } else {
+        print("Could not submit. Please check the error message below, contact the assistant if needed.")
+    }
+    
+    print(content(result))
+    
+}
+
+check_format <- function(predictions){
+    
+    if(is.data.frame(predictions) | is.data.frame(predictions)){
+        if(all(c('product_content_id','forecast') %in% names(predictions))){
+            if(is.numeric(predictions$forecast)){
+                print("Format OK")
+                return(TRUE)
+            } else {
+                print("forecast information is not numeric")
+                return(FALSE)                
+            }
+        } else {
+            print("Wrong column names. Please provide 'product_content_id' and 'forecast' columns")
+            return(FALSE)
+        }
+        
+    } else {
+        print("Wrong format. Please provide data.frame or data.table object")
+        return(FALSE)
+    }
+    
+}
+
+# this part is main code
+subm_url = 'http://167.172.183.67'
+
+u_name = "Group19"
+p_word = "iPQoxtKaAg86IAaM"
+submit_now = FALSE
+
+username = u_name
+password = p_word
+
+token = get_token(username=u_name, password=p_word, url=subm_url)
+data = get_data(token=token,url=subm_url)
+
+
+unique(data[,list(product_content_id)])
+
+
+data[, visit_turnover_rate := data$sold_count/data$visit_count]
+data[, basket_turnover_rate := data$sold_count/data$basket_count]
+data[is.na(data)] <- 0
+
+
+
+
+#-------------PRODUCT1--------Yuz Temizleyici
+product1 = data[data$product_content_id==85004]
+summary(product1)
+product1ts = ts(product1$sold_count,start = min(product1$event_date))
+ts.plot(product1ts)
+acf(product1ts)
+acf(product1$sold_count,lag.max = 100)
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product1_xts <- xts(data[product_content_id==85004],order.by = dates )
+head(product1_xts)
+#To better predict, certain peaks will be adjusted 
+for(i in 1:length(product1$sold_count)){
+    
+    if(product1$sold_count[i]>= 200){
+        product1$sold_count[i]=mean(product1$sold_count[i-7:i+7])
+        
+    }
+    
+}
+ts.plot(product1$sold_count)
+lines(product1$visit_count/100,col  = 'red')
+lines(product1$price, col = 'blue')
+
+
+
+#trend analysis -product1
+product1t = data[product_content_id==85004]
+product1t = product1t[order(event_date)]
+sold_product1t=zoo(product1t[,list(sold_count, visit_count, basket_count, favored_count)],product1t$event_date)
+plot(sold_product1t)
+for_product1 = product1t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product1 = for_product1[event_date > "2019-10-01"]
+for_product1[,time_index:=1:.N]
+head(for_product1)
+trend_product1 = lm(sold_count~time_index, data = for_product1)
+summary(product1)
+trend_product1_component = trend_product1$fitted
+for_product1[,lr_trend:=trend_product1_component]
+matplot(for_product1[,list(sold_count, lr_trend)], type = "l")
+for_product1[,detr_sc:=sold_count-lr_trend]
+detr_for_product1 = for_product1[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product1 = ts(detr_for_product1$detr_sc, freq = 7)
+t_product1 = ts(for_product1$lr_trend, freq = 7)
+#forecast
+fc_t_product1 = forecast(t_product1,2)
+summary(fc_t_product1)
+#autoarima and arima 
+
+ar.product1.1 <- auto.arima(product1$sold_count)
+ar.product1.2 <- arima(product1$sold_count, c(3,1,2))
+summary(ar.product1.1)
+summary(ar.product1.2)
+for1.1 <- forecast(ar.product1.1)
+for1.2 <- forecast(ar.product1.2)
+checkresiduals(ar.product1.1)
+checkresiduals(ar.product1.2)
+#Lineer regression model
+
+product1.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product1)
+summary(product1.1)
+AIC(product1.1)
+checkresiduals(product1.1)
+
+#Unimportant parameters will be deleted one by one after the first iteration.
+
+product1.2 <-lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_visits,product1)
+summary(product1.2)
+AIC(product1.2)
+checkresiduals(product1.2)
+# According to Coefficients ,We 're going to add a square of some parameters  significant.
+product1.3 <-lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+price+category_visits,product1)
+summary(product1.3)
+AIC(product1.3)
+product1.4 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+I(basket_count^2)+price+category_visits,product1)
+summary(product1.4)
+AIC(product1.4)
+# Since the number of baskets is not important, it should be deleted.
+product1.5 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+price+I(price^2)+category_visits,product1)
+summary(product1.5)
+AIC(product1.5)
+#R-squared value is  0.82.Diminishes the AIC interest
+
+
+
+
+#------------------PRODUCT2----------- Islak Mendil & Havlu
+product2 = data[data$product_content_id==4066298]
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product2_xts <- xts(data[product_content_id==4066298],order.by = dates )
+head(product2_xts)
+
+for(i in 1:length(product2$price)){
+    
+    if(product2$price[i]==-1){
+        product2$price[i]=mean(product2$price[1:length(product2$price)])
+    }
+    
+}
+summary(product2)
+product2_ts = ts(product2$sold_count,start = min(product2$event_date))
+ts.plot(product2_ts)
+acf(product2_ts)
+
+acf(product2$sold_count,lag.max = 100)
+for(i in 1:length(product2$sold_count)){
+    
+    if(product2$sold_count[i]>= 500){
+        product2$sold_count[i]=mean(product2$sold_count[i-7:i+7])
+            }
+    
+}
+ts.plot(product2$sold_count)
+lines(product2$visit_count/100,col  = 'red')
+lines(product2$price, col = 'blue')
+
+
+
+#trend analysis-product2
+product2t = data[product_content_id==4066298]
+product2t = product2t[order(event_date)]
+sold_product2t=zoo(product2t[,list(sold_count, visit_count, basket_count, favored_count)],product2t$event_date)
+plot(sold_product2t)
+for_product2 = product2t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product2 = for_product2[event_date > "2019-10-01"]
+for_product2[,time_index:=1:.N]
+head(for_product2)
+trend_product2 = lm(sold_count~time_index, data = for_product2)
+summary(product2)
+trend_product2_component = trend_product2$fitted
+for_product2[,lr_trend:=trend_product2_component]
+matplot(for_product2[,list(sold_count, lr_trend)], type = "l")
+for_product2[,detr_sc:=sold_count-lr_trend]
+detr_for_product2 = for_product2[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product2 = ts(detr_for_product2$detr_sc, freq = 7)
+t_product2 = ts(for_product2$lr_trend, freq = 7)
+fc_t_product2 = forecast(t_product2,2)
+summary(fc_t_product2)
+
+#arima
+
+ar.product2.1 <- auto.arima(product2$sold_count)
+ar.product2.2 <- arima(product2$sold_count, c(3,1,2))
+summary(ar.product2.1)
+summary(ar.product2.2)
+for2.1 <- forecast(ar.product2.1)
+for2.2 <- forecast(ar.product2.2)
+checkresiduals(ar.product2.1)
+checkresiduals(ar.product2.2)
+#linear model.
+product2.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product2)
+summary(product2.1)
+AIC(product2.1)
+checkresiduals(product2.1)
+
+# visit_count will be eliminated in the model
+product2.2 <-lm(sold_count~favored_count+category_sold+basket_count+price+category_brand_sold+ category_visits,product2)
+summary(product2.2)
+AIC(product2.2)
+checkresiduals(product2.2)
+# we will add square of some so significant parameters.
+product2.3 <-lm(sold_count~visit_count+favored_count+I(favored_count^2)+category_sold+basket_count+price+category_visits+I(category_visits^2),product2)
+summary(product2.3)
+AIC(product2.3)
+# Since the number of baskets is not important, it should be deleted.
+product2.4 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+I(basket_count^2)+price+category_visits,product2)
+summary(product2.4)
+AIC(product2.4)
+#  category_sold is not so significant so deleted and add 
+product2.5 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+basket_count+price+I(price^2)+category_visits,product2)
+summary(product2.5)
+AIC(product2.5)
+#R-squared:  0.50,the akaike value decreased 
+
+
+
+
+
+
+#------------------PRODUCT3-------------Telefon Bluetooth Kulaklýk
+
+product3 <- data[product_content_id == "6676673"]
+summary(product3)
+
+ts.plot(product3$sold_count)
+lines(product3$visit_count/100,col  = 'blue')
+lines(product3$price, col = 'red')
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product3_xts <- xts(data[product_content_id==6676673],order.by = dates )
+head(product3_xts)
+
+#trend analysis-product3
+product3t = data[product_content_id == "6676673"]
+product3t = product3t[order(event_date)]
+sold_product3t=zoo(product3t[,list(sold_count, visit_count, basket_count, favored_count)],product3t$event_date)
+plot(sold_product3t)
+for_product3 = product3t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product3 = for_product3[event_date > "2019-10-01"]
+for_product3[,time_index:=1:.N]
+head(for_product3)
+trend_product3 = lm(sold_count~time_index, data = for_product3)
+summary(product3)
+trend_product3_component = trend_product3$fitted
+for_product3[,lr_trend:=trend_product3_component]
+matplot(for_product3[,list(sold_count, lr_trend)], type = "l")
+for_product3[,detr_sc:=sold_count-lr_trend]
+detr_for_product3 = for_product3[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product3 = ts(detr_for_product3$detr_sc, freq = 7)
+fc_t_product3 = forecast(t_product3,2)
+summary(fc_t_product3)
+
+#autoarima and arima 
+ar.product3.1 <- auto.arima(product3$sold_count)
+ar.product3.2 <- arima(product3$sold_count, c(3,1,2))
+summary(ar.product3.1)
+summary(ar.product3.2)
+for3.1 <- forecast(ar.product3.1)
+for3.2 <- forecast(ar.product3.2)
+checkresiduals(ar.product3.1)
+checkresiduals(ar.product3.2)
+
+#Lineer regression model
+
+product3.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product3)
+summary(product3.1)
+AIC(product3.1)
+checkresiduals(product3.1)
+
+#basket_cound will be delated
+
+product3.2 <-lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+category_visits,product3)
+summary(product3.2)
+AIC(product3.2)
+checkresiduals(product3.2)
+# we will add square of some so significant parameters.
+product3.3 <-lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+price+category_brand_sold+category_visits,product3)
+summary(product3.3)
+AIC(product3.3)
+
+product3.4 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+price+category_visits,product3)
+summary(product3.4)
+AIC(product3.4)
+# price is not so significant so deleted
+product3.5 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+category_visits,product3)
+summary(product3.5)
+AIC(product3.5)
+#R-squared:  0.86 and the akaike value decreased 
+
+
+
+#---------------PRODUCT4-----------Supurge
+
+product4 <- data[product_content_id == "7061886"]
+
+summary(product4)
+ts.plot(product4$sold_count)
+lines(product4$visit_count/100, col  = 'blue')
+lines(product4$price, col = 'red')
+acf(product4$sold_count,lag.max = 100)
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product4_xts <- xts(data[product_content_id==7061886],order.by = dates )
+head(product4_xts)
+
+#trend analysis -product4
+product4t = data[product_content_id == "7061886"]
+product4t = product4t[order(event_date)]
+sold_product4t=zoo(product4t[,list(sold_count, visit_count, basket_count, favored_count)],product4t$event_date)
+plot(sold_product4t)
+for_product4 = product4t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product4 = for_product4[event_date > "2019-10-01"]
+for_product4[,time_index:=1:.N]
+head(for_product4)
+trend_product4 = lm(sold_count~time_index, data = for_product4)
+summary(product4)
+trend_product4_component = trend_product4$fitted
+for_product4[,lr_trend:=trend_product4_component]
+matplot(for_product4[,list(sold_count, lr_trend)], type = "l")
+for_product4[,detr_sc:=sold_count-lr_trend]
+detr_for_product4 = for_product4[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product4 = ts(detr_for_product4$detr_sc, freq = 7)
+#forecast
+fc_t_product4 = forecast(t_product4,2)
+summary(fc_t_product4)
+
+#autoarima and arimad 
+
+ar.product4.1 <- auto.arima(product4$sold_count)
+ar.product4.2 <- arima(product4$sold_count, c(3,1,2))
+summary(ar.product4.1)
+summary(ar.product4.2)
+for4.1 <- forecast(ar.product4.1)
+for4.2 <- forecast(ar.product4.2)
+checkresiduals(ar.product4.1)
+checkresiduals(ar.product4.2)
+
+#Lineer regression model
+
+product4.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product4)
+summary(product4.1)
+AIC(product4.1)
+checkresiduals(product4.1)
+
+#price will be delated in the model
+
+product4.2 <-lm(sold_count~visit_count+favored_count+category_sold+basket_count+category_brand_sold+category_visits,product4)
+summary(product4.2)
+AIC(product4.2)
+checkresiduals(product4.2)
+# add square of some significant parameters.
+
+product4.3 <-lm(sold_count~visit_count+favored_count+I(favored_count^2)+category_sold+basket_count+category_brand_sold+category_visits,product4)
+summary(product4.3)
+AIC(product4.3)
+
+product4.4 <- lm(sold_count~visit_count+I(favored_count^2)+favored_count+category_sold+I(category_brand_sold^2)+basket_count+category_brand_sold+category_visits,product4)
+summary(product4.4)
+AIC(product4.4)
+#square of category_brand_sold will be deleted
+
+product4.5 <- lm(sold_count~visit_count+I(favored_count^2)+favored_count+category_sold+basket_count+category_brand_sold+category_visits,product4)
+summary(product4.5)
+AIC(product4.5)
+
+#R-squared:  0.91 and the akaike value decreased more 
+
+
+
+
+#-----------------PRODUCT5---------------Tayt
+
+product5 <- data[product_content_id == "31515569"]
+
+product5 <- product5[146:length(product5$price)]
+
+
+for(i in 1:length(product5$price)){
+    
+    if(product5$price[i]==-1){
+        product5$price[i]=mean(product5$price[1:length(product5$price)])
+    }
+}
+summary(product5)
+ts.plot(product5$sold_count)
+lines(product5$visit_count/100, col  = 'blue')
+lines(product5$price, col = 'red')
+
+acf(product5$sold_count,lag.max = 100)
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product5_xts <- xts(data[product_content_id==31515569],order.by = dates )
+head(product5_xts)
+
+#trend analysis -product5
+product5t = data[product_content_id == "31515569"]
+product5t = product5t[order(event_date)]
+sold_product5t=zoo(product5t[,list(sold_count, visit_count, basket_count, favored_count)],product5t$event_date)
+plot(sold_product5t)
+for_product5 = product5t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product5 = for_product5[event_date > "2019-10-01"]
+for_product5[,time_index:=1:.N]
+head(for_product5)
+trend_product5 = lm(sold_count~time_index, data = for_product5)
+summary(product5)
+trend_product5_component = trend_product5$fitted
+for_product5[,lr_trend:=trend_product5_component]
+matplot(for_product5[,list(sold_count, lr_trend)], type = "l")
+for_product5[,detr_sc:=sold_count-lr_trend]
+detr_for_product5 = for_product5[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product5 = ts(detr_for_product5$detr_sc, freq = 7)
+#forecast
+fc_t_product5 = forecast(t_product5,2)
+summary(fc_t_product5)
+
+
+#autoarima and arima 
+
+ar.product5.1 <- auto.arima(product5$sold_count)
+ar.product5.2 <- arima(product5$sold_count, c(3,1,2))
+summary(ar.product5.1)
+summary(ar.product5.2)
+for5.1 <- forecast(ar.product5.1)
+for5.2 <- forecast(ar.product5.2)
+checkresiduals(ar.product5.1)
+checkresiduals(ar.product5.2)
+
+#Linear regression model
+
+product5.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product5)
+summary(product5.1)
+AIC(product5.1)
+checkresiduals(product5.1)
+
+#category_brand_sold will be deleted
+
+product5.2 <-lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_visits,product5)
+summary(product5.2)
+AIC(product5.2)
+checkresiduals(product5.2)
+# we will add square of some so significant parameters.
+product5.3 <-lm(sold_count~visit_count+favored_count+I(favored_count^2)+category_sold+basket_count+price+category_visits,product5)
+summary(product5.3)
+AIC(product5.3)
+
+product5.4 <- lm(sold_count~visit_count+favored_count+I(favored_count^2)+category_sold+I(category_sold^2)+basket_count+I(category_sold^2)+price+category_visits,product5)
+summary(product5.4)
+AIC(product5.4)
+# square of the favored-count is not so significant so deleted
+product5.5 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+I(category_sold^2)+category_visits,product5)
+summary(product5.5)
+AIC(product5.5)
+#R-squared:  0.80 and the akaike value decreased more 
+
+
+#--------------------product6-----------------Sarj Edebilir Dis Fýrcasý
+product6 <- data[product_content_id == "32939029"]
+product6 <- product6[206:length(product6$price)]
+for(i in 1:length(product6$price)){
+    
+    if(product6$price[i]==-1){
+        product6$price[i]=mean(product6$price[1:length(product6$price)])
+    }
+}
+summary(product6)
+ts.plot(product6$sold_count)
+lines(product6$visit_count/100, col  = 'blue')
+lines(product6$price, col = 'red')
+
+acf(product6$sold_count,lag.max = 100)
+
+for(i in 1:length(product6$sold_count)){
+    
+    if(product6$sold_count[i]>= 400){
+        product6$sold_count[i]=mean(product6$sold_count[i-7:i+7])
+        
+    }
+    
+}
+ts.plot(product6$sold_count)
+lines(product6$visit_count/100,col  = 'blue')
+lines(product6$price, col = 'red')
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product6_xts <- xts(data[product_content_id==32939029],order.by = dates )
+head(product6_xts)
+
+#trend analysis -product6
+product6t = data[product_content_id == "32939029"]
+product6t = product6t[order(event_date)]
+sold_product6t=zoo(product6t[,list(sold_count, visit_count, basket_count, favored_count)],product6t$event_date)
+plot(sold_product6t)
+for_product6 = product6t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product6 = for_product6[event_date > "2019-10-01"]
+for_product6[,time_index:=1:.N]
+head(for_product6)
+trend_product6 = lm(sold_count~time_index, data = for_product6)
+summary(product6)
+trend_product6_component = trend_product6$fitted
+for_product6[,lr_trend:=trend_product6_component]
+matplot(for_product6[,list(sold_count, lr_trend)], type = "l")
+for_product6[,detr_sc:=sold_count-lr_trend]
+detr_for_product6 = for_product6[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product6 = ts(detr_for_product6$detr_sc, freq = 7)
+t_product6 = ts(for_product6$lr_trend, freq = 7)
+#forecast
+fc_t_product6 = forecast(t_product6 , 2 )
+summary(fc_t_product6 )
+
+#autoarima and arima
+
+ar.product6.1 <- auto.arima(product6$sold_count)
+ar.product6.2 <- arima(product6$sold_count, c(3,1,2))
+summary(ar.product6.1)
+summary(ar.product6.2)
+for6.1 <- forecast(ar.product6.1)
+for6.2 <- forecast(ar.product6.2)
+checkresiduals(ar.product6.1)
+checkresiduals(ar.product6.2)
+
+#Lineer regression model
+product6.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product6)
+summary(product6.1)
+AIC(product6.1)
+checkresiduals(product6.1)
+
+#category_brand_sold will be deleted
+
+product6.2 <-lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_visits,product6)
+summary(product6.2)
+AIC(product6.2)
+checkresiduals(product6.2)
+# we will add square of some so significant parameters.
+product6.3 <-lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+price+category_visits,product6)
+summary(product6.3)
+AIC(product6.3)
+
+product6.4 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+I(basket_count^2)+price+category_visits,product6)
+summary(product6.4)
+AIC(product6.4)
+# square of the basket count is not so significant so deleted
+product6.5 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+price+I(price^2)+category_visits,product6)
+summary(product6.5)
+AIC(product6.5)
+#R-squared:  0.76 the akaike value decreased more 
+
+
+
+#----------------product7---------------Bikini Ustu
+
+product7 <- data[product_content_id == "5926527"]
+
+for(i in 1:length(product7$price)){
+    
+    if(product7$price[i]==-1){
+        product7$price[i]=mean(product7$price[1:length(product7$price)])
+    }
+}
+summary(product7)
+ts.plot(product7$sold_count)
+lines(product7$visit_count/100, col  = 'blue')
+
+acf(product7$sold_count,lag.max = 100)
+
+for(i in 1:length(product7$sold_count)){
+    
+    if(product7$sold_count[i]>= 400){
+        product7$sold_count[i]=mean(product7$sold_count[i-7:i+7])
+    }
+}
+
+ts.plot(product7$sold_count)
+lines(product7$visit_count/100,col  = 'blue')
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product7_xts <- xts(data[product_content_id==5926527],order.by = dates )
+head(product7_xts)
+
+#trend analysis -product7
+product7t = data[product_content_id == "5926527"]
+product7t = product7t[order(event_date)]
+sold_product7t=zoo(product7t[,list(sold_count, visit_count, basket_count, favored_count)],product7t$event_date)
+plot(sold_product7t)
+for_product7 = product7t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product7 = for_product7[event_date > "2019-10-01"]
+for_product7[,time_index:=1:.N]
+head(for_product7)
+trend_product7 = lm(sold_count~time_index, data = for_product7)
+summary(product7)
+trend_product7_component = trend_product7$fitted
+for_product7[,lr_trend:=trend_product7_component]
+matplot(for_product7[,list(sold_count, lr_trend)], type = "l")
+for_product7[,detr_sc:=sold_count-lr_trend]
+detr_for_product7 = for_product7[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product7 = ts(detr_for_product7$detr_sc, freq = 7)
+#forecast
+fc_t_product7 = forecast(t_product7,2)
+summary(fc_t_product7)
+
+#autoarima and arima
+
+ar.product7.1 <- auto.arima(product7$sold_count)
+ar.product7.2 <- arima(product7$sold_count, c(3,1,2))
+summary(ar.product7.1)
+summary(ar.product7.2)
+for7.1 <- forecast(ar.product7.1)
+for7.2 <- forecast(ar.product7.2)
+checkresiduals(ar.product7.1)
+
+#Linear regression model
+
+product7.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product7)
+summary(product7.1)
+AIC(product7.1)
+checkresiduals(product7.1)
+#basket_count must be deleted
+product7.2 <-lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+category_visits,product7)
+summary(product7.2)
+AIC(product7.2)
+checkresiduals(product7.2)
+# we will add square of some so significant parameters.
+product7.3 <-lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+I(category_brand_sold^2)+category_brand_sold+category_visits,product7)
+summary(product7.3)
+AIC(product7.3)
+
+product7.4 <- lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+I(category_brand_sold^2)+category_brand_sold+category_visits,product7)
+summary(product7.4)
+AIC(product7.4)
+# category_brand_sold is not so significant so deleted
+product7.5 <- lm(sold_count~visit_count+favored_count+category_sold+price+I(category_brand_sold^2)+category_brand_sold+category_visits,product7)
+summary(product7.5)
+AIC(product7.5)
+#R-squared:  0.66 the akaike value decreased 
+
+
+
+
+#-------------------product8-------------------Mont
+
+product8 <- data[product_content_id == "3904356"]
+for(i in 1:length(product8$price)){
+    if(product8$price[i]==-1){
+        product8$price[i]=mean(product8$price[1:length(product8$price)])
+    }
+}
+summary(product8)
+
+ts.plot(product8$sold_count)
+lines(product8$visit_count/100, col  = 'blue')
+
+acf(product8$sold_count,lag.max = 100)
+
+dates <- seq(as.Date("2019-04-30"), length = uniqueN(data$event_date), by = "days")
+dates <- seq(as.Date("2019-04-30"), length = nrow(data)/8, by = "days")
+
+product8_xts <- xts(data[product_content_id==3904356],order.by = dates )
+head(product8_xts)
+
+#trend analysis -product8
+product8t = data[product_content_id == "3904356"]
+product8t = product8t[order(event_date)]
+sold_product8t=zoo(product8t[,list(sold_count, visit_count, basket_count, favored_count)],product8t$event_date)
+plot(sold_product8t)
+for_product8 = product8t[,list(sold_count, event_date, price, visit_count, favored_count, basket_count)]
+for_product8 = for_product8[event_date > "2019-10-01"]
+for_product8[,time_index:=1:.N]
+head(for_product8)
+trend_product8 = lm(sold_count~time_index, data = for_product8)
+summary(product8)
+trend_product8_component = trend_product8$fitted
+for_product8[,lr_trend:=trend_product8_component]
+matplot(for_product8[,list(sold_count, lr_trend)], type = "l")
+for_product8[,detr_sc:=sold_count-lr_trend]
+detr_for_product8 = for_product8[,list(detr_sc, event_date, time_index, price, visit_count, favored_count, basket_count)]
+y_product8 = ts(detr_for_product8$detr_sc, freq = 7)
+#forecast
+fc_t_product8 = forecast(t_product8,2)
+summary(fc_t_product8)
+
+#autoarima and arima
+
+ar.product8.1 <- auto.arima(product8$sold_count)
+ar.product8.2 <- arima(product8$sold_count, c(3,1,2))
+summary(ar.product8.1)
+summary(ar.product8.2)
+for8.1 <- forecast(ar.product8.1)
+for8.2 <- forecast(ar.product8.2)
+checkresiduals(ar.product8.1)
+checkresiduals(ar.product8.2)
+#Lineer regression model
+
+product8.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,product8)
+summary(product8.1)
+AIC(product8.1)
+checkresiduals(product8.1)
+
+#basket_count will be delated in the model
+product8.2 <-lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+category_visits,product8)
+summary(product8.2)
+AIC(product8.2)
+checkresiduals(product8.2)
+#add square of some significant parameters.
+product8.3 <-lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+I(category_brand_sold^2)+category_visits,product8)
+summary(product8.3)
+AIC(product8.3)
+
+product8.4 <- lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+category_visits+I(category_visits^2),product8)
+summary(product8.4)
+AIC(product8.4)
+# square of the category_visits is not so significant so deleted  
+product8.5 <- lm(sold_count~visit_count+favored_count+category_sold+price+category_brand_sold+category_visits,product8)
+summary(product8.5)
+AIC(product8.5)
+#R-squared:  0.86 and the akaike value decreased
+
+
+
+
+
+predictions=unique(data[,list(product_content_id)])
+predictions[,forecast:=product_content_id]
+
+
+
+send_submission(predictions, token, url=subm_url, submit_now=F)
+    
